@@ -17,8 +17,7 @@
 # under the License.
 from __future__ import annotations
 
-from unittest import mock
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from _pytest.outcomes import importorskip
@@ -38,6 +37,8 @@ from openlineage.client.facet import (
     ColumnLineageDatasetFacet,
     ColumnLineageDatasetFacetFieldsAdditional,
     ColumnLineageDatasetFacetFieldsAdditionalInputFields,
+    SchemaDatasetFacet,
+    SchemaField,
     SqlJobFacet,
 )
 from openlineage.client.run import Dataset
@@ -162,9 +163,7 @@ def test_exec_success(sql, return_last, split_statement, hook_results, hook_desc
         )
 
 
-@mock.patch("airflow.providers.openlineage.utils.utils.should_use_external_connection")
-def test_execute_openlineage_events(should_use_external_connection):
-    should_use_external_connection.return_value = False
+def test_execute_openlineage_events():
     DB_NAME = "DATABASE"
     DB_SCHEMA_NAME = "PUBLIC"
 
@@ -175,6 +174,9 @@ def test_execute_openlineage_events(should_use_external_connection):
         get_conn = MagicMock(name="conn")
         get_connection = MagicMock()
 
+        def get_first(self, *_):
+            return [f"{DB_NAME}.{DB_SCHEMA_NAME}"]
+
     dbapi_hook = SnowflakeHookForTests()
 
     class SnowflakeOperatorForTest(SnowflakeOperator):
@@ -183,7 +185,7 @@ def test_execute_openlineage_events(should_use_external_connection):
 
     sql = (
         "INSERT INTO Test_table\n"
-        "SELECT t1.*, t2.additional_constant FROM ANOTHER_DB.ANOTHER_SCHEMA.popular_orders_day_of_week t1\n"
+        "SELECT t1.*, t2.additional_constant FROM ANOTHER_db.another_schema.popular_orders_day_of_week t1\n"
         "JOIN little_table t2 ON t1.order_day_of_week = t2.order_day_of_week;\n"
         "FORGOT TO COMMENT"
     )
@@ -221,7 +223,6 @@ def test_execute_openlineage_events(should_use_external_connection):
     dbapi_hook.get_connection.return_value = Connection(
         conn_id="snowflake_default",
         conn_type="snowflake",
-        schema="PUBLIC",
         extra={
             "account": "test_account",
             "region": "us-east",
@@ -232,17 +233,55 @@ def test_execute_openlineage_events(should_use_external_connection):
     dbapi_hook.get_conn.return_value.cursor.return_value.fetchall.side_effect = rows
 
     lineage = op.get_openlineage_facets_on_start()
-    # Not calling Snowflake
-    assert dbapi_hook.get_conn.return_value.cursor.return_value.execute.mock_calls == []
+    assert dbapi_hook.get_conn.return_value.cursor.return_value.execute.mock_calls == [
+        call(
+            "SELECT database.information_schema.columns.table_schema, database.information_schema.columns.table_name, "
+            "database.information_schema.columns.column_name, database.information_schema.columns.ordinal_position, "
+            "database.information_schema.columns.data_type, database.information_schema.columns.table_catalog \n"
+            "FROM database.information_schema.columns \n"
+            "WHERE database.information_schema.columns.table_name IN ('LITTLE_TABLE') "
+            "UNION ALL "
+            "SELECT another_db.information_schema.columns.table_schema, another_db.information_schema.columns.table_name, "
+            "another_db.information_schema.columns.column_name, another_db.information_schema.columns.ordinal_position, "
+            "another_db.information_schema.columns.data_type, another_db.information_schema.columns.table_catalog \n"
+            "FROM another_db.information_schema.columns \n"
+            "WHERE another_db.information_schema.columns.table_schema = 'ANOTHER_SCHEMA' "
+            "AND another_db.information_schema.columns.table_name IN ('POPULAR_ORDERS_DAY_OF_WEEK')"
+        ),
+        call(
+            "SELECT database.information_schema.columns.table_schema, database.information_schema.columns.table_name, "
+            "database.information_schema.columns.column_name, database.information_schema.columns.ordinal_position, "
+            "database.information_schema.columns.data_type, database.information_schema.columns.table_catalog \n"
+            "FROM database.information_schema.columns \n"
+            "WHERE database.information_schema.columns.table_name IN ('TEST_TABLE')"
+        ),
+    ]
 
     assert lineage.inputs == [
         Dataset(
             namespace="snowflake://test_account.us-east.aws",
-            name=f"{DB_NAME}.{DB_SCHEMA_NAME}.LITTLE_TABLE",
+            name=f"{ANOTHER_DB_NAME}.{ANOTHER_DB_SCHEMA}.POPULAR_ORDERS_DAY_OF_WEEK",
+            facets={
+                "schema": SchemaDatasetFacet(
+                    fields=[
+                        SchemaField(name="ORDER_DAY_OF_WEEK", type="TEXT"),
+                        SchemaField(name="ORDER_PLACED_ON", type="TIMESTAMP_NTZ"),
+                        SchemaField(name="ORDERS_PLACED", type="NUMBER"),
+                    ]
+                )
+            },
         ),
         Dataset(
             namespace="snowflake://test_account.us-east.aws",
-            name=f"{ANOTHER_DB_NAME}.{ANOTHER_DB_SCHEMA}.POPULAR_ORDERS_DAY_OF_WEEK",
+            name=f"{DB_NAME}.{DB_SCHEMA_NAME}.LITTLE_TABLE",
+            facets={
+                "schema": SchemaDatasetFacet(
+                    fields=[
+                        SchemaField(name="ORDER_DAY_OF_WEEK", type="TEXT"),
+                        SchemaField(name="ADDITIONAL_CONSTANT", type="TEXT"),
+                    ]
+                )
+            },
         ),
     ]
     assert lineage.outputs == [
@@ -250,6 +289,14 @@ def test_execute_openlineage_events(should_use_external_connection):
             namespace="snowflake://test_account.us-east.aws",
             name=f"{DB_NAME}.{DB_SCHEMA_NAME}.TEST_TABLE",
             facets={
+                "schema": SchemaDatasetFacet(
+                    fields=[
+                        SchemaField(name="ORDER_DAY_OF_WEEK", type="TEXT"),
+                        SchemaField(name="ORDER_PLACED_ON", type="TIMESTAMP_NTZ"),
+                        SchemaField(name="ORDERS_PLACED", type="NUMBER"),
+                        SchemaField(name="ADDITIONAL_CONSTANT", type="TEXT"),
+                    ]
+                ),
                 "columnLineage": ColumnLineageDatasetFacet(
                     fields={
                         "additional_constant": ColumnLineageDatasetFacetFieldsAdditional(
