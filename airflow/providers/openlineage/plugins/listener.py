@@ -17,13 +17,16 @@
 from __future__ import annotations
 
 import logging
+import os
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+import psutil
 from openlineage.client.serde import Serde
 
 from airflow import __version__ as airflow_version
+from airflow.api_internal.internal_api_call import InternalApiConfig
 from airflow.listeners import hookimpl
 from airflow.providers.openlineage import conf
 from airflow.providers.openlineage.extractors import ExtractorManager
@@ -71,7 +74,7 @@ class OpenLineageListener:
         self,
         previous_state,
         task_instance: TaskInstance,
-        session: Session,  # This will always be QUEUED
+        session: Session,
     ):
         if not getattr(task_instance, "task", None) is not None:
             self.log.warning(
@@ -153,7 +156,20 @@ class OpenLineageListener:
                 len(Serde.to_json(redacted_event).encode("utf-8")),
             )
 
-        on_running()
+        pid = os.fork()
+        if pid:
+            process = psutil.Process(pid)
+            process.wait(5)
+        else:
+            if not InternalApiConfig.get_use_internal_api():
+                # Force a new SQLAlchemy session. We can't share open DB handles
+                # between process. The cli code will re-create this as part of its
+                # normal startup
+                from airflow import settings
+
+                settings.engine.pool.dispose()
+                settings.engine.dispose()
+            on_running()
 
     @hookimpl
     def on_task_instance_success(self, previous_state, task_instance: TaskInstance, session):
@@ -215,7 +231,20 @@ class OpenLineageListener:
                 len(Serde.to_json(redacted_event).encode("utf-8")),
             )
 
-        on_success()
+        pid = os.fork()
+        if pid:
+            process = psutil.Process(pid)
+            process.wait(5)
+        else:
+            if not InternalApiConfig.get_use_internal_api():
+                # Force a new SQLAlchemy session. We can't share open DB handles
+                # between process. The cli code will re-create this as part of its
+                # normal startup
+                from airflow import settings
+
+                settings.engine.pool.dispose()
+                settings.engine.dispose()
+            on_success()
 
     @hookimpl
     def on_task_instance_failed(self, previous_state, task_instance: TaskInstance, session):
@@ -277,7 +306,20 @@ class OpenLineageListener:
                 len(Serde.to_json(redacted_event).encode("utf-8")),
             )
 
-        on_failure()
+        pid = os.fork()
+        if pid:
+            process = psutil.Process(pid)
+            process.wait(5)
+        else:
+            if not InternalApiConfig.get_use_internal_api():
+                # Force a new SQLAlchemy session. We can't share open DB handles
+                # between process. The cli code will re-create this as part of its
+                # normal startup
+                from airflow import settings
+
+                settings.engine.pool.dispose()
+                settings.engine.dispose()
+            on_failure()
 
     @property
     def executor(self):
