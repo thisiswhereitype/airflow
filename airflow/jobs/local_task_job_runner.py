@@ -110,6 +110,8 @@ class LocalTaskJobRunner(BaseJobRunner, LoggingMixin):
         self.terminating = False
 
         self._state_change_checks = 0
+        # time spend after task completed, but before it exited - used to measure listener execution time
+        self._overtime = 0.0
 
     def _execute(self) -> int | None:
         from airflow.task.task_runner import get_task_runner
@@ -195,7 +197,7 @@ class LocalTaskJobRunner(BaseJobRunner, LoggingMixin):
                         self.job.heartrate if self.job.heartrate is not None else heartbeat_time_limit,
                     ),
                 )
-
+                self.log.error("WAITING TIME %f", max_wait_time)
                 return_code = self.task_runner.return_code(timeout=max_wait_time)
                 if return_code is not None:
                     self.handle_task_exit(return_code)
@@ -251,6 +253,7 @@ class LocalTaskJobRunner(BaseJobRunner, LoggingMixin):
     def heartbeat_callback(self, session: Session = NEW_SESSION) -> None:
         """Self destruct task if state has been moved away from running externally."""
         if self.terminating:
+            self.log.error("TERMINATING")
             # ensure termination if processes are created later
             self.task_runner.terminate()
             return
@@ -290,6 +293,8 @@ class LocalTaskJobRunner(BaseJobRunner, LoggingMixin):
                 )
                 raise AirflowException("PID of job runner does not match")
         elif self.task_runner.return_code() is None and hasattr(self.task_runner, "process"):
+            self._overtime = (timezone.utcnow() - (ti.end_date or timezone.utcnow())).total_seconds()
+            self.log.error("checking process code? overtime %f", self._overtime)
             if ti.state == TaskInstanceState.SKIPPED:
                 # A DagRun timeout will cause tasks to be externally marked as skipped.
                 dagrun = ti.get_dagrun(session=session)
@@ -304,13 +309,19 @@ class LocalTaskJobRunner(BaseJobRunner, LoggingMixin):
                     self.log.warning("DagRun timed out after %s.", execution_time)
 
             # potential race condition, the _run_raw_task commits `success` or other state
-            # but task_runner does not exit right away due to slow process shutdown or any other reasons
-            # let's do a throttle here, if the above case is true, the handle_task_exit will handle it
-            if self._state_change_checks >= 1:  # defer to next round of heartbeat
+            # but task_runner does not exit right away due to slow process shutdown, listener execution
+            # or any other reasons - let's do a throttle here, if the above case is true, the
+            # handle_task_exit will handle it
+            if self._state_change_checks >= 1 and self._overtime > conf.getint(
+                "core", "task_listener_timeout"
+            ):
+                self.log.warning("Overtime: %f", self._overtime)
                 self.log.warning(
                     "State of this instance has been externally set to %s. Terminating instance.", ti.state
                 )
                 self.terminating = True
+            else:
+                self.log.error("still checking - will kill on next call")
             self._state_change_checks += 1
 
     def _log_return_code_metric(self, return_code: int):

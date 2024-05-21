@@ -329,6 +329,13 @@ core:
       type: string
       example: ~
       default: "downstream"
+    task_listener_timeout:
+      description: |
+        Maximum possible time (in seconds) that task listener will have for their execution.
+      version_added: 2.10.0
+      type: integer
+      example: ~
+      default: "10"
     default_task_execution_timeout:
       description: |
         The default task execution_timeout value for the operators. Expected an integer value to

@@ -26,7 +26,6 @@ import psutil
 from openlineage.client.serde import Serde
 
 from airflow import __version__ as airflow_version
-from airflow.api_internal.internal_api_call import InternalApiConfig
 from airflow.listeners import hookimpl
 from airflow.providers.openlineage import conf
 from airflow.providers.openlineage.extractors import ExtractorManager
@@ -39,6 +38,7 @@ from airflow.providers.openlineage.utils.utils import (
     is_selective_lineage_enabled,
     print_warning,
 )
+from airflow.settings import configure_orm
 from airflow.stats import Stats
 from airflow.utils.timeout import timeout
 
@@ -133,7 +133,6 @@ class OpenLineageListener:
                 dagrun.data_interval_start.isoformat() if dagrun.data_interval_start else None
             )
             data_interval_end = dagrun.data_interval_end.isoformat() if dagrun.data_interval_end else None
-
             redacted_event = self.adapter.start_task(
                 run_id=task_uuid,
                 job_name=get_job_name(task),
@@ -156,20 +155,28 @@ class OpenLineageListener:
                 len(Serde.to_json(redacted_event).encode("utf-8")),
             )
 
+        # on_running()
+
         pid = os.fork()
         if pid:
+            self.log.info("On Start: Spawned new process with pid %s", pid)
             process = psutil.Process(pid)
-            process.wait(5)
+            try:
+                self.log.info("Waiting for process %s", pid)
+                process.wait(10)
+            except psutil.TimeoutExpired:
+                self.log.error("TIMEOUT EXPIRED")
+                process.kill()
+                self.log.error("TIMEOUT EXPIRED for %s - AFTER KILL", pid)
+            except BaseException:
+                self.log.error("BASE_EXCEPTION")
+            self.log.info("Process with pid %s finished - parent", pid)
         else:
-            if not InternalApiConfig.get_use_internal_api():
-                # Force a new SQLAlchemy session. We can't share open DB handles
-                # between process. The cli code will re-create this as part of its
-                # normal startup
-                from airflow import settings
-
-                settings.engine.pool.dispose()
-                settings.engine.dispose()
+            configure_orm(disable_connection_pool=True)
+            self.log.info("After fork - new process with current PID.")
             on_running()
+            self.log.info("Process with current pid finishes after on_running")
+            os._exit(0)
 
     @hookimpl
     def on_task_instance_success(self, previous_state, task_instance: TaskInstance, session):
@@ -217,6 +224,11 @@ class OpenLineageListener:
                 )
 
             end_date = task_instance.end_date if task_instance.end_date else datetime.now()
+            self.log.error("PRE_RE")
+            import re
+
+            re.match(r"(a?){30}a{30}", "a" * 30)
+            self.log.error("POST_RE")
 
             redacted_event = self.adapter.complete_task(
                 run_id=task_uuid,
@@ -231,20 +243,28 @@ class OpenLineageListener:
                 len(Serde.to_json(redacted_event).encode("utf-8")),
             )
 
+        # on_success()
+
         pid = os.fork()
         if pid:
+            self.log.info("On Success: Spawned new process with pid %s", pid)
             process = psutil.Process(pid)
-            process.wait(5)
+            try:
+                self.log.info("Waiting for process %s", pid)
+                process.wait(5)
+            except psutil.TimeoutExpired:
+                self.log.error("TIMEOUT EXPIRED")
+                process.kill()
+                self.log.error("TIMEOUT EXPIRED for %s - AFTER KILL", pid)
+            except BaseException:
+                self.log.error("BASE_EXCEPTION")
+            self.log.info("Process with pid %s finished - parent", pid)
         else:
-            if not InternalApiConfig.get_use_internal_api():
-                # Force a new SQLAlchemy session. We can't share open DB handles
-                # between process. The cli code will re-create this as part of its
-                # normal startup
-                from airflow import settings
-
-                settings.engine.pool.dispose()
-                settings.engine.dispose()
+            configure_orm(disable_connection_pool=True)
+            self.log.info("After fork - new process with current PID.")
             on_success()
+            self.log.info("Process with current pid finishes after on_success")
+            os._exit(0)
 
     @hookimpl
     def on_task_instance_failed(self, previous_state, task_instance: TaskInstance, session):
@@ -306,20 +326,28 @@ class OpenLineageListener:
                 len(Serde.to_json(redacted_event).encode("utf-8")),
             )
 
+        # on_failure()
+
         pid = os.fork()
         if pid:
+            self.log.info("On Fail: Spawned new process with pid %s", pid)
             process = psutil.Process(pid)
-            process.wait(5)
+            try:
+                self.log.info("Waiting for process %s", pid)
+                process.wait(10)
+            except psutil.TimeoutExpired:
+                self.log.error("TIMEOUT EXPIRED")
+                process.kill()
+                self.log.error("TIMEOUT EXPIRED for %s - AFTER KILL", pid)
+            except BaseException:
+                self.log.error("BASE_EXCEPTION")
+            self.log.info("Process with pid %s finished - parent", pid)
         else:
-            if not InternalApiConfig.get_use_internal_api():
-                # Force a new SQLAlchemy session. We can't share open DB handles
-                # between process. The cli code will re-create this as part of its
-                # normal startup
-                from airflow import settings
-
-                settings.engine.pool.dispose()
-                settings.engine.dispose()
+            configure_orm(disable_connection_pool=True)
+            self.log.info("After fork - new process with current PID.")
             on_failure()
+            self.log.info("Process with current pid finishes after on_failure")
+            os._exit(0)
 
     @property
     def executor(self):

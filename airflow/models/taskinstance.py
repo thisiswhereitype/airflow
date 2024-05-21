@@ -2525,10 +2525,12 @@ class TaskInstance(Base, LoggingMixin):
             except (AirflowFailException, AirflowSensorTimeout) as e:
                 # If AirflowFailException is raised, task should not retry.
                 # If a sensor in reschedule mode reaches timeout, task should not retry.
+                self.log.exception("FAIL?")
                 self.handle_failure(e, test_mode, context, force_fail=True, session=session)
                 session.commit()
                 raise
             except (AirflowTaskTimeout, AirflowException, AirflowTaskTerminated) as e:
+                self.log.exception("TIMEOUT? WUT?")
                 if not test_mode:
                     self.refresh_from_db(lock_for_update=True, session=session)
                 # for case when task is marked as success/failed externally
